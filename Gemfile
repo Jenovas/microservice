@@ -13,7 +13,7 @@ gem "pg", "1.5.8"
 gem "puma", "6.4.2"
 gem "thruster", "~> 0.1.10"
 
-gem "concurrent-ruby", "~> 1.2"  # For concurrent operations
+gem "concurrent-ruby", "~> 1.3"  # For concurrent operations
 gem "connection_pool", "~> 2.4"  # For connection pooling
 gem "google-cloud-storage", "~> 1.44"  # For Firebase service account
 gem "jwt", "~> 2.7"  # For Firebase authentication

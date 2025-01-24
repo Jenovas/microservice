@@ -254,7 +254,7 @@ GEM
     parser (3.3.6.0)
       ast (~> 2.4.1)
       racc
-    pg (1.5.8)
+    pg (1.5.9)
     psych (5.2.2)
       date
       stringio
@@ -421,7 +421,7 @@ DEPENDENCIES
   jwt (~> 2.7)
   karafka (= 2.4.12)
   kredis (= 1.7.0)
-  pg (= 1.5.8)
+  pg (= 1.5.9)
   puma (= 6.4.2)
   rails (= 8.0.1)
   rspec-rails (= 7.0.2)

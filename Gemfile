@@ -5,7 +5,7 @@ gem "rails", "8.0.1"
 gem "apipie-rails", "1.4.2"
 gem "bootsnap", "1.18.4", require: false
 # gem "datadog", "2.7.0", require: "datadog/auto_instrument"
-gem "hirber", "0.8.5"
+gem "hirber", "0.8.7"
 gem "jbuilder", "2.12.0"
 gem "karafka", "2.4.12"
 gem "kredis", "1.7.0"

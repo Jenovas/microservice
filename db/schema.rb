@@ -26,8 +26,8 @@ ActiveRecord::Schema[8.0].define(version: 2024_03_20_000002) do
     t.datetime "updated_at", null: false
     t.index ["campaign_guid", "token"], name: "index_campaigns_on_campaign_guid_and_token", unique: true
     t.index ["campaign_guid"], name: "index_campaigns_on_campaign_guid"
-    t.check_constraint "campaign_type::text = ANY (ARRAY['push'::character varying::text, 'in_app'::character varying::text, 'feed'::character varying::text])", name: "valid_campaign_type"
-    t.check_constraint "device_type::text = ANY (ARRAY['android'::character varying::text, 'ios'::character varying::text])", name: "valid_device_type"
+    t.check_constraint "campaign_type::text = ANY (ARRAY['push'::character varying, 'in_app'::character varying, 'feed'::character varying]::text[])", name: "valid_campaign_type"
+    t.check_constraint "device_type::text = ANY (ARRAY['android'::character varying, 'ios'::character varying]::text[])", name: "valid_device_type"
   end
 
   create_table "push_results", force: :cascade do |t|

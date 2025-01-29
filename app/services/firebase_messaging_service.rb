@@ -12,8 +12,6 @@ class FirebaseMessagingService
   REQUEST_TIMEOUT = 10   # 10 second timeout for FCM requests
   MAX_RETRIES = 5       # Maximum number of retries
   JITTER_RANGE = 0.5    # ±50% jitter
-  MAX_CONCURRENT_RETRIES = 1000  # Maximum number of messages in retry queue
-  THREAD_POOL_SIZE = 20  # Number of threads for sending messages
 
   # Error codes that should not be retried (permanent failures)
   NON_RETRYABLE_ERRORS = {
@@ -40,91 +38,15 @@ class FirebaseMessagingService
   def initialize
     @token_cache = {}
     @cache_mutex = Mutex.new
-    @retry_queue = []
-    @retry_mutex = Mutex.new
-    @thread_pool = Concurrent::ThreadPoolExecutor.new(
-      min_threads: 5,
-      max_threads: THREAD_POOL_SIZE,
-      max_queue: MAX_CONCURRENT_RETRIES,
-      fallback_policy: :caller_runs
-    )
-    @retry_scheduler = Concurrent::TimerTask.new(execution_interval: 1) do
-      process_retry_queue
-    end
-    @retry_scheduler.execute
-  end
-
-  def retry_stats
-    @retry_mutex.synchronize do
-      {
-        total_retries: @retry_queue.size,
-        retries_by_age: retry_count_by_age,
-        oldest_retry: @retry_queue.first&.dig(:started_at)&.iso8601,
-        newest_retry: @retry_queue.last&.dig(:started_at)&.iso8601
-      }
-    end
-  end
-
-  def cancel_retries(count = nil)
-    @retry_mutex.synchronize do
-      if count
-        removed = @retry_queue.shift(count)
-        Rails.logger.info("[Firebase] Cancelled #{removed.size} oldest retries")
-        removed.size
-      else
-        size = @retry_queue.size
-        @retry_queue.clear
-        Rails.logger.info("[Firebase] Cancelled all #{size} retries")
-        size
-      end
-    end
   end
 
   def send_message(credentials, message)
-    future = Concurrent::Promise.new(executor: @thread_pool) do
-      send_message_internal(credentials, message)
-    end
-
-    future.on_success do |result|
-      Rails.logger.info("[Firebase] Message sent successfully")
-    end
-
-    future.on_error do |error|
-      Rails.logger.error("[Firebase] Failed to send message: #{error.message}")
-    end
-
-    future
-  end
-
-  private
-
-  def process_retry_queue
-    @retry_mutex.synchronize do
-      current_time = Time.current
-      retries_to_process = @retry_queue.select { |r| r[:next_retry] <= current_time }
-
-      retries_to_process.each do |retry_item|
-        @retry_queue.delete(retry_item)
-
-        # Schedule retry in thread pool
-        Concurrent::Promise.new(executor: @thread_pool) do
-          credentials_json = parse_credentials(retry_item[:credentials])
-          send_message_internal(credentials_json, retry_item[:message], retry_item)
-        end.execute
-      end
-    end
-  rescue StandardError => e
-    Rails.logger.error("[Firebase] Error processing retry queue: #{e.message}")
-  end
-
-  def send_message_internal(credentials, message, retry_info = nil)
     credentials_json = parse_credentials(credentials)
     project_id = credentials_json["project_id"]
     url = FCM_URL % project_id
 
-    start_time = retry_info&.dig(:started_at) || Time.current
-    retries = retry_info&.dig(:retry_count) || 0
-    retry_id = retry_info&.dig(:id) || SecureRandom.uuid
+    start_time = Time.current
+    retries = 0
 
     begin
       response = HTTP.timeout(REQUEST_TIMEOUT)
@@ -144,98 +66,45 @@ class FirebaseMessagingService
         case strategy
         when :abort
           Rails.logger.error("[Firebase] Non-retryable error: #{error}")
-          remove_from_retry_queue(retry_id)
           raise "Firebase API error: #{error}"
         when :retry_429
           retry_after = response.headers["retry-after"]&.to_i || 60
-          schedule_retry(retry_id, credentials_json, message, start_time, retries, retry_after)
-          return
+          raise RetryableError.new("Rate limited", retry_after)
         when :retry
           if NON_RETRYABLE_ERRORS.key?(error)
             Rails.logger.error("[Firebase] Non-retryable error: #{error} - #{NON_RETRYABLE_ERRORS[error]}")
-            remove_from_retry_queue(retry_id)
             raise "Firebase API error: #{error} - #{NON_RETRYABLE_ERRORS[error]}"
           end
-          schedule_retry(retry_id, credentials_json, message, start_time, retries, MIN_RETRY_DELAY)
-          return
+          raise RetryableError.new("Firebase API error: #{error}", MIN_RETRY_DELAY)
         end
       end
 
-      remove_from_retry_queue(retry_id)
       response_body
-    rescue StandardError => e
-      handle_error(e, retry_id, credentials_json, message, start_time, retries)
-    end
-  end
+    rescue RetryableError, HTTP::TimeoutError, HTTP::ConnectionError => e
+      retry_after = e.respond_to?(:retry_after) ? e.retry_after : calculate_retry_delay(retries)
 
-  def schedule_retry(retry_id, credentials, message, start_time, retries, base_delay)
-    return if retries >= MAX_RETRIES
-
-    retry_after = calculate_retry_delay(retries)
-    retry_after = [ base_delay, retry_after ].max
-
-    # Check maximum retry time
-    if Time.current - start_time + retry_after > MAX_RETRY_TIME
-      Rails.logger.error("[Firebase] Exceeded maximum retry time of #{MAX_RETRY_TIME} seconds")
-      remove_from_retry_queue(retry_id)
-      raise "Firebase error: Maximum retry time exceeded"
-    end
-
-    # Add to retry queue with jittered delay
-    jittered_delay = apply_jitter(retry_after)
-    next_retry = Time.current + jittered_delay
-
-    @retry_mutex.synchronize do
-      if @retry_queue.size >= MAX_CONCURRENT_RETRIES
-        Rails.logger.error("[Firebase] Retry queue full (#{@retry_queue.size} items). Dropping retry attempt.")
-        raise "Firebase error: Retry queue full"
+      # Check if we've exceeded the maximum retry time
+      if Time.current - start_time + retry_after > MAX_RETRY_TIME
+        Rails.logger.error("[Firebase] Exceeded maximum retry time of #{MAX_RETRY_TIME} seconds")
+        raise "Firebase error: Maximum retry time exceeded"
       end
 
-      @retry_queue << {
-        id: retry_id,
-        project_id: credentials["project_id"],
-        started_at: start_time,
-        retry_count: retries + 1,
-        next_retry: next_retry,
-        credentials: credentials,
-        message: message
-      }
+      if retries < MAX_RETRIES
+        retries += 1
 
-      @retry_queue.sort_by! { |r| r[:next_retry] }
-    end
+        # Apply jitter to the retry delay
+        jittered_delay = apply_jitter(retry_after)
+        Rails.logger.warn("[Firebase] Error encountered, attempt #{retries}/#{MAX_RETRIES}. Retrying in #{jittered_delay.round(2)}s... Error: #{e.message}")
 
-    Rails.logger.warn("[Firebase] Scheduled retry #{retries + 1}/#{MAX_RETRIES} for #{retry_after}s (jittered: #{jittered_delay.round(2)}s)")
-  end
-
-  def handle_error(error, retry_id, credentials, message, start_time, retries)
-    if error.is_a?(RetryableError) || error.is_a?(HTTP::TimeoutError) || error.is_a?(HTTP::ConnectionError)
-      retry_after = error.respond_to?(:retry_after) ? error.retry_after : calculate_retry_delay(retries)
-      schedule_retry(retry_id, credentials, message, start_time, retries, retry_after)
-    else
-      remove_from_retry_queue(retry_id)
-      raise error
-    end
-  end
-
-  def remove_from_retry_queue(retry_id)
-    @retry_mutex.synchronize do
-      @retry_queue.delete_if { |r| r[:id] == retry_id }
-    end
-  end
-
-  def retry_count_by_age
-    now = Time.current
-    @retry_queue.group_by do |retry_item|
-      age = now - retry_item[:started_at]
-      case age
-      when 0..60        then "1m"
-      when 60..300      then "5m"
-      when 300..900     then "15m"
-      when 900..1800    then "30m"
-      else                   "1h+"
+        sleep jittered_delay
+        retry
       end
-    end.transform_values(&:count)
+
+      raise "Firebase error after #{retries} retries: #{e.message}"
+    end
   end
+
+  private
 
   class RetryableError < StandardError
     attr_reader :retry_after

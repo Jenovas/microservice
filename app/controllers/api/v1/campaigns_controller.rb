@@ -1,8 +1,6 @@
 module Api
   module V1
     class CampaignsController < ApplicationController
-      include ActionController::API
-
       rescue_from ActiveRecord::RecordNotFound, with: :not_found
       rescue_from ActionController::ParameterMissing, with: :bad_request
 
@@ -31,14 +29,14 @@ module Api
         campaigns = campaigns.by_device_type(params[:device_type]) if params[:device_type].present?
 
         results = PushResult.where(campaign_guid: params[:campaign_guid])
-        results = results.where(status: params[:status]) if params[:status].present?
+        results = results.where(was_success: params[:status] == "success") if params[:status].present?
 
         render json: {
           campaign_guid: params[:campaign_guid],
           total_recipients: campaigns.count,
           total_results: results.count,
-          success_count: results.where(status: "success").count,
-          failure_count: results.where(status: "failure").count,
+          success_count: results.where(was_success: true).count,
+          failure_count: results.where(was_success: false).count,
           campaigns: campaigns.map { |c| campaign_response(c) },
           results: results.map { |r| result_response(r) }
         }
@@ -64,8 +62,9 @@ module Api
         {
           id: result.id,
           campaign_guid: result.campaign_guid,
-          token: result.token,
-          status: result.status,
+          user_token: result.user_token,
+          platform: result.platform,
+          was_success: result.was_success,
           error: result.error,
           created_at: result.created_at
         }

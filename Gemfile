@@ -11,7 +11,7 @@ gem "karafka", "2.4.12"
 gem "kredis", "1.7.0"
 gem "pg", "1.5.8"
 gem "puma", "6.4.2"
-gem "thruster", "~> 0.1.10"
+gem "thruster", "~> 0.1.11"
 
 gem "concurrent-ruby", "~> 1.2"  # For concurrent operations
 gem "connection_pool", "~> 2.4"  # For connection pooling
